@@ -311,18 +311,25 @@ int main(int argc, const char *argv[]) {
 
         for (auto it2 = (dataBuffer.end() - 2)->boundingBoxes.begin();
              it2 != (dataBuffer.end() - 2)->boundingBoxes.end(); ++it2) {
-          if (it1->first == it2->boxID) // check wether current match partner
+          if (it1->first == it2->boxID) // check wether previous match partner
                                         // corresponds to this BB
           {
             prevBB = &(*it2);
           }
         }
 
+        //        std::cout << "currBB=" << currBB->lidarPoints.size()
+        //                  << " prevBB=" << prevBB->lidarPoints.size() <<
+        //                  std::endl;
+
         // compute TTC for current match
         if (currBB->lidarPoints.size() > 0 &&
             prevBB->lidarPoints.size() >
                 0) // only compute TTC if we have Lidar points
         {
+          //          std::cout << "prevBB=" << prevBB->boxID
+          //                    << " -> currBB=" << currBB->boxID << std::endl;
+
           //// STUDENT ASSIGNMENT
           //// TASK FP.2 -> compute time-to-collision based on Lidar data
           ///(implement -> computeTTCLidar)
