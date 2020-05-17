@@ -44,4 +44,17 @@ struct DataFrame { // represents the available sensor information at the same
       bbMatches; // bounding box matches between previous and current frame
 };
 
+// Helper to collect stats data
+struct Stats {
+  std::string det;
+  std::string des;
+  double ttc_lidar{0};
+  double ttc_camera{0};
+  int img_idx{0};
+  size_t id{0};
+
+  Stats(const std::string &det, const std::string &des, int img_idx)
+      : det{det}, des{des}, img_idx{img_idx} {}
+};
+
 #endif /* dataStructures_h */

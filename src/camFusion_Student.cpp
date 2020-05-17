@@ -1,5 +1,6 @@
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <numeric>
 #include <opencv2/features2d.hpp>
@@ -316,4 +317,37 @@ void matchBoundingBoxes(std::vector<cv::DMatch> &matches,
       bbBestMatches.emplace(query_bb_iter->boxID, max_curr_bb);
     }
   }
+}
+
+// Helpers
+StatsFactory &StatsFactory::instance() {
+  static StatsFactory instance;
+  return instance;
+}
+void StatsFactory::add_record(const std::string &det, const std::string &des,
+                              int img_index) {
+  curr_idx = storage.size();
+  storage.emplace_back(Stats(det, des, img_index));
+  storage[curr_idx].id = curr_idx;
+}
+void StatsFactory::update_ttc_lidar(double ttc_lidar) {
+  storage[curr_idx].ttc_lidar = ttc_lidar;
+}
+void StatsFactory::update_ttc_camera(double ttc_camera) {
+  storage[curr_idx].ttc_camera = ttc_camera;
+}
+void StatsFactory::write(const std::string &output_path) {
+  std::ofstream out;
+  out.open(output_path);
+  std::stringstream head_ss;
+  head_ss << "det,des,id,img_idx,ttc_lidar,ttc_camera,ttc_diff";
+  out << head_ss.str() << "\n";
+  for (auto iter = storage.begin(); iter != storage.end(); ++iter) {
+    std::stringstream ss;
+    ss << iter->det << "," << iter->des << "," << iter->id << ","
+       << iter->img_idx << "," << iter->ttc_lidar << "," << iter->ttc_camera
+       << "," << (iter->ttc_lidar - iter->ttc_camera);
+    out << ss.str() << "\n";
+  }
+  out.close();
 }

@@ -30,6 +30,8 @@ int main(int argc, const char *argv[]) {
   // data location
   string dataPath = "../";
 
+  string outputPath = "stats_output.csv";
+
   // camera
   string imgBasePath = dataPath + "images/";
   string imgPrefix =
@@ -120,266 +122,295 @@ int main(int argc, const char *argv[]) {
   bool bVis = false;                // visualize results
 
   /* MAIN LOOP OVER ALL IMAGES */
-
-  for (size_t imgIndex = 0; imgIndex <= imgEndIndex - imgStartIndex;
-       imgIndex += imgStepWidth) {
-    /* LOAD IMAGE INTO BUFFER */
-
-    // assemble filenames for current index
-    ostringstream imgNumber;
-    imgNumber << setfill('0') << setw(imgFillWidth) << imgStartIndex + imgIndex;
-    string imgFullFilename =
-        imgBasePath + imgPrefix + imgNumber.str() + imgFileType;
-
-    // load image from file
-    cv::Mat img = cv::imread(imgFullFilename);
-
-    // push image into data frame buffer
-    DataFrame frame;
-    frame.cameraImg = img;
-    // Ring buffer.
-    while (dataBuffer.size() > dataBufferSize) {
-      dataBuffer.pop_front();
-    }
-    dataBuffer.push_back(frame);
-
-    cout << "#1 : LOAD IMAGE INTO BUFFER done" << endl;
-
-    /* DETECT & CLASSIFY OBJECTS */
-
-    float confThreshold = 0.2;
-    float nmsThreshold = 0.4;
-    detectObjects((dataBuffer.end() - 1)->cameraImg,
-                  (dataBuffer.end() - 1)->boundingBoxes, confThreshold,
-                  nmsThreshold, yoloBasePath, yoloClassesFile,
-                  yoloModelConfiguration, yoloModelWeights, bVis);
-
-    cout << "#2 : DETECT & CLASSIFY OBJECTS done" << endl;
-
-    /* CROP LIDAR POINTS */
-
-    // load 3D Lidar points from file
-    string lidarFullFilename =
-        imgBasePath + lidarPrefix + imgNumber.str() + lidarFileType;
-    std::vector<LidarPoint> lidarPoints;
-    loadLidarFromFile(lidarPoints, lidarFullFilename);
-
-    // remove Lidar points based on distance properties
-    float minZ = -1.5, maxZ = -0.9, minX = 2.0, maxX = 20.0, maxY = 2.0,
-          minR = 0.1; // focus on ego lane
-    cropLidarPoints(lidarPoints, minX, maxX, maxY, minZ, maxZ, minR);
-
-    (dataBuffer.end() - 1)->lidarPoints = lidarPoints;
-
-    //    showLidarImgOverlay((dataBuffer.end() - 1)->cameraImg,
-    //                        (dataBuffer.end() - 1)->lidarPoints, P_rect_00,
-    //                        R_rect_00, RT, nullptr);
-
-    cout << "#3 : CROP LIDAR POINTS done" << endl;
-
-    /* CLUSTER LIDAR POINT CLOUD */
-
-    // associate Lidar points with camera-based ROI
-    float shrinkFactor =
-        0.10; // shrinks each bounding box by the given percentage to avoid 3D
-              // object merging at the edges of an ROI
-    clusterLidarWithROI((dataBuffer.end() - 1)->boundingBoxes,
-                        (dataBuffer.end() - 1)->lidarPoints, shrinkFactor,
-                        P_rect_00, R_rect_00, RT);
-
-    // Visualize 3D objects
-    bVis = true;
-    if (bVis) {
-      show3DObjects((dataBuffer.end() - 1)->boundingBoxes, cv::Size(4.0, 20.0),
-                    cv::Size(600, 600), true);
-    }
-    bVis = false;
-
-    cout << "#4 : CLUSTER LIDAR POINT CLOUD done" << endl;
-
-    // REMOVE THIS LINE BEFORE PROCEEDING WITH THE FINAL PROJECT
-    //    continue; // skips directly to the next image without processing what
-    //    comes
-    // beneath
-
-    /* DETECT IMAGE KEYPOINTS */
-
-    // convert current image to grayscale
-    cv::Mat imgGray;
-    cv::cvtColor((dataBuffer.end() - 1)->cameraImg, imgGray,
-                 cv::COLOR_BGR2GRAY);
-
-    // extract 2D keypoints from current image
-    vector<cv::KeyPoint>
-        keypoints;                // create empty feature list for current image
-    string detectorType = "FAST"; // "SHITOMASI";
-
-    if (detectorType.compare("SHITOMASI") == 0) {
-      detKeypointsShiTomasi(keypoints, imgGray, false);
-    } else if (detectorType.compare("HARRIS") == 0) {
-      detKeypointsHarris(keypoints, imgGray, false);
-    } else {
-      detKeypointsModern(keypoints, imgGray, detectorType, false);
-    }
-
-    // optional : limit number of keypoints (helpful for debugging and learning)
-    bool bLimitKpts = false;
-    if (bLimitKpts) {
-      int maxKeypoints = 50;
-
-      if (detectorType.compare("SHITOMASI") ==
-          0) { // there is no response info, so keep the first 50 as they are
-               // sorted in descending quality order
-        keypoints.erase(keypoints.begin() + maxKeypoints, keypoints.end());
+  std::vector<std::string> detectorTypes = {"FAST",  "BRISK",
+                                            "ORB",    "AKAZE", "SIFT"};
+  std::vector<std::string> descriptorTypes = {"BRISK", "BRIEF", "ORB",
+                                              "FREAK", "AKAZE", "SIFT"};
+  for (const auto &detectorType : detectorTypes) {
+    for (const auto &descriptorType : descriptorTypes) {
+      if ((detectorType.compare("SIFT") == 0) &&
+          (descriptorType.compare("BRIEF") == 0)) {
+        std::cerr << "OpenCV errors on: " << detectorType << "x"
+                  << descriptorType << " combination" << std::endl;
+        continue;
       }
-      cv::KeyPointsFilter::retainBest(keypoints, maxKeypoints);
-      cout << " NOTE: Keypoints have been limited!" << endl;
-    }
+      dataBuffer.clear(); // Start with a clean data buffer.
 
-    // push keypoints and descriptor for current frame to end of data buffer
-    (dataBuffer.end() - 1)->keypoints = keypoints;
+      for (size_t imgIndex = 0; imgIndex <= imgEndIndex - imgStartIndex;
+           imgIndex += imgStepWidth) {
+        /* LOAD IMAGE INTO BUFFER */
 
-    cout << "#5 : DETECT KEYPOINTS done" << endl;
+        // assemble filenames for current index
+        ostringstream imgNumber;
+        imgNumber << setfill('0') << setw(imgFillWidth)
+                  << imgStartIndex + imgIndex;
+        string imgFullFilename =
+            imgBasePath + imgPrefix + imgNumber.str() + imgFileType;
 
-    /* EXTRACT KEYPOINT DESCRIPTORS */
+        // load image from file
+        cv::Mat img = cv::imread(imgFullFilename);
 
-    cv::Mat descriptors;
-    string descriptorType = "AKAZE"; // BRISK, BRIEF, ORB, FREAK, AKAZE, SIFT
-    descKeypoints((dataBuffer.end() - 1)->keypoints,
-                  (dataBuffer.end() - 1)->cameraImg, descriptors,
-                  descriptorType);
+        // push image into data frame buffer
+        DataFrame frame;
+        frame.cameraImg = img;
+        // Ring buffer.
+        while (dataBuffer.size() > dataBufferSize) {
+          dataBuffer.pop_front();
+        }
+        dataBuffer.push_back(frame);
 
-    // push descriptors for current frame to end of data buffer
-    (dataBuffer.end() - 1)->descriptors = descriptors;
+        cout << "#1 : LOAD IMAGE INTO BUFFER done" << endl;
 
-    cout << "#6 : EXTRACT DESCRIPTORS done" << endl;
+        /* DETECT & CLASSIFY OBJECTS */
 
-    if (dataBuffer.size() >
-        1) // wait until at least two images have been processed
-    {
+        float confThreshold = 0.2;
+        float nmsThreshold = 0.4;
+        detectObjects((dataBuffer.end() - 1)->cameraImg,
+                      (dataBuffer.end() - 1)->boundingBoxes, confThreshold,
+                      nmsThreshold, yoloBasePath, yoloClassesFile,
+                      yoloModelConfiguration, yoloModelWeights, bVis);
 
-      /* MATCH KEYPOINT DESCRIPTORS */
+        cout << "#2 : DETECT & CLASSIFY OBJECTS done" << endl;
 
-      vector<cv::DMatch> matches;
-      string matcherType = "MAT_FLANN";     // MAT_BF, MAT_FLANN
-      string descriptorType = "DES_BINARY"; // DES_BINARY, DES_HOG
-      string selectorType = "SEL_KNN";      // SEL_NN, SEL_KNN
+        /* CROP LIDAR POINTS */
 
-      matchDescriptors((dataBuffer.end() - 2)->keypoints,
-                       (dataBuffer.end() - 1)->keypoints,
-                       (dataBuffer.end() - 2)->descriptors,
-                       (dataBuffer.end() - 1)->descriptors, matches,
-                       descriptorType, matcherType, selectorType);
+        // load 3D Lidar points from file
+        string lidarFullFilename =
+            imgBasePath + lidarPrefix + imgNumber.str() + lidarFileType;
+        std::vector<LidarPoint> lidarPoints;
+        loadLidarFromFile(lidarPoints, lidarFullFilename);
 
-      // store matches in current data frame
-      (dataBuffer.end() - 1)->kptMatches = matches;
+        // remove Lidar points based on distance properties
+        float minZ = -1.5, maxZ = -0.9, minX = 2.0, maxX = 20.0, maxY = 2.0,
+              minR = 0.1; // focus on ego lane
+        cropLidarPoints(lidarPoints, minX, maxX, maxY, minZ, maxZ, minR);
 
-      cout << "#7 : MATCH KEYPOINT DESCRIPTORS done" << endl;
+        (dataBuffer.end() - 1)->lidarPoints = lidarPoints;
 
-      /* TRACK 3D OBJECT BOUNDING BOXES */
+        //    showLidarImgOverlay((dataBuffer.end() - 1)->cameraImg,
+        //                        (dataBuffer.end() - 1)->lidarPoints,
+        //                        P_rect_00, R_rect_00, RT, nullptr);
 
-      //// STUDENT ASSIGNMENT
-      //// TASK FP.1 -> match list of 3D objects (vector<BoundingBox>) between
-      /// current and previous frame (implement ->matchBoundingBoxes)
-      map<int, int> bbBestMatches;
-      matchBoundingBoxes(
-          matches, bbBestMatches, *(dataBuffer.end() - 2),
-          *(dataBuffer.end() - 1)); // associate bounding boxes between current
-                                    // and previous frame using keypoint matches
-      //// EOF STUDENT ASSIGNMENT
+        cout << "#3 : CROP LIDAR POINTS done" << endl;
 
-      // store matches in current data frame
-      (dataBuffer.end() - 1)->bbMatches = bbBestMatches;
+        /* CLUSTER LIDAR POINT CLOUD */
 
-      cout << "#8 : TRACK 3D OBJECT BOUNDING BOXES done" << endl;
+        // associate Lidar points with camera-based ROI
+        float shrinkFactor =
+            0.10; // shrinks each bounding box by the given percentage to avoid
+                  // 3D object merging at the edges of an ROI
+        clusterLidarWithROI((dataBuffer.end() - 1)->boundingBoxes,
+                            (dataBuffer.end() - 1)->lidarPoints, shrinkFactor,
+                            P_rect_00, R_rect_00, RT);
 
-      /* COMPUTE TTC ON OBJECT IN FRONT */
+        // Visualize 3D objects
+        bVis = false;
+        if (bVis) {
+          show3DObjects((dataBuffer.end() - 1)->boundingBoxes,
+                        cv::Size(4.0, 20.0), cv::Size(600, 600), true);
+        }
+        bVis = false;
 
-      // loop over all BB match pairs
-      for (auto it1 = (dataBuffer.end() - 1)->bbMatches.begin();
-           it1 != (dataBuffer.end() - 1)->bbMatches.end(); ++it1) {
-        // find bounding boxes associates with current match
-        BoundingBox *prevBB, *currBB;
-        for (auto it2 = (dataBuffer.end() - 1)->boundingBoxes.begin();
-             it2 != (dataBuffer.end() - 1)->boundingBoxes.end(); ++it2) {
-          if (it1->second == it2->boxID) // check wether current match partner
-                                         // corresponds to this BB
-          {
-            currBB = &(*it2);
-          }
+        cout << "#4 : CLUSTER LIDAR POINT CLOUD done" << endl;
+
+        // REMOVE THIS LINE BEFORE PROCEEDING WITH THE FINAL PROJECT
+        //    continue; // skips directly to the next image without processing
+        //    what comes
+        // beneath
+
+        /* DETECT IMAGE KEYPOINTS */
+
+        // convert current image to grayscale
+        cv::Mat imgGray;
+        cv::cvtColor((dataBuffer.end() - 1)->cameraImg, imgGray,
+                     cv::COLOR_BGR2GRAY);
+
+        // extract 2D keypoints from current image
+        vector<cv::KeyPoint>
+            keypoints; // create empty feature list for current image
+                       //        string detectorType = "FAST"; // "SHITOMASI";
+
+        if (detectorType.compare("SHITOMASI") == 0) {
+          detKeypointsShiTomasi(keypoints, imgGray, false);
+        } else if (detectorType.compare("HARRIS") == 0) {
+          detKeypointsHarris(keypoints, imgGray, false);
+        } else {
+          detKeypointsModern(keypoints, imgGray, detectorType, false);
         }
 
-        for (auto it2 = (dataBuffer.end() - 2)->boundingBoxes.begin();
-             it2 != (dataBuffer.end() - 2)->boundingBoxes.end(); ++it2) {
-          if (it1->first == it2->boxID) // check wether previous match partner
-                                        // corresponds to this BB
-          {
-            prevBB = &(*it2);
+        // optional : limit number of keypoints (helpful for debugging and
+        // learning)
+        bool bLimitKpts = false;
+        if (bLimitKpts) {
+          int maxKeypoints = 50;
+
+          if (detectorType.compare("SHITOMASI") ==
+              0) { // there is no response info, so keep the first 50 as they
+                   // are sorted in descending quality order
+            keypoints.erase(keypoints.begin() + maxKeypoints, keypoints.end());
           }
+          cv::KeyPointsFilter::retainBest(keypoints, maxKeypoints);
+          cout << " NOTE: Keypoints have been limited!" << endl;
         }
 
-        //        std::cout << "currBB=" << currBB->lidarPoints.size()
-        //                  << " prevBB=" << prevBB->lidarPoints.size() <<
-        //                  std::endl;
+        // push keypoints and descriptor for current frame to end of data buffer
+        (dataBuffer.end() - 1)->keypoints = keypoints;
 
-        // compute TTC for current match
-        if (currBB->lidarPoints.size() > 0 &&
-            prevBB->lidarPoints.size() >
-                0) // only compute TTC if we have Lidar points
+        cout << "#5 : DETECT KEYPOINTS done" << endl;
+
+        /* EXTRACT KEYPOINT DESCRIPTORS */
+
+        cv::Mat descriptors;
+        //        string descriptorType =
+        //            "AKAZE"; // BRISK, BRIEF, ORB, FREAK, AKAZE, SIFT
+        descKeypoints((dataBuffer.end() - 1)->keypoints,
+                      (dataBuffer.end() - 1)->cameraImg, descriptors,
+                      descriptorType);
+
+        // push descriptors for current frame to end of data buffer
+        (dataBuffer.end() - 1)->descriptors = descriptors;
+
+        cout << "#6 : EXTRACT DESCRIPTORS done" << endl;
+
+        if (dataBuffer.size() >
+            1) // wait until at least two images have been processed
         {
-          //          std::cout << "prevBB=" << prevBB->boxID
-          //                    << " -> currBB=" << currBB->boxID << std::endl;
+          StatsFactory::instance().add_record(detectorType, descriptorType,
+                                              imgIndex);
 
-          //// STUDENT ASSIGNMENT
-          //// TASK FP.2 -> compute time-to-collision based on Lidar data
-          ///(implement -> computeTTCLidar)
-          double ttcLidar;
-          computeTTCLidar(prevBB->lidarPoints, currBB->lidarPoints,
-                          sensorFrameRate, ttcLidar);
-          //// EOF STUDENT ASSIGNMENT
+          /* MATCH KEYPOINT DESCRIPTORS */
 
-          //// STUDENT ASSIGNMENT
-          //// TASK FP.3 -> assign enclosed keypoint matches to bounding box
-          ///(implement -> clusterKptMatchesWithROI) / TASK FP.4 -> compute
-          /// time-to-collision based on camera (implement -> computeTTCCamera)
-          double ttcCamera;
-          clusterKptMatchesWithROI(*currBB, (dataBuffer.end() - 2)->keypoints,
-                                   (dataBuffer.end() - 1)->keypoints,
-                                   (dataBuffer.end() - 1)->kptMatches);
-          computeTTCCamera((dataBuffer.end() - 2)->keypoints,
+          vector<cv::DMatch> matches;
+          string matcherType = "MAT_FLANN";     // MAT_BF, MAT_FLANN
+          string descriptorType = "DES_BINARY"; // DES_BINARY, DES_HOG
+          string selectorType = "SEL_KNN";      // SEL_NN, SEL_KNN
+
+          matchDescriptors((dataBuffer.end() - 2)->keypoints,
                            (dataBuffer.end() - 1)->keypoints,
-                           currBB->kptMatches, sensorFrameRate, ttcCamera);
+                           (dataBuffer.end() - 2)->descriptors,
+                           (dataBuffer.end() - 1)->descriptors, matches,
+                           descriptorType, matcherType, selectorType);
+
+          // store matches in current data frame
+          (dataBuffer.end() - 1)->kptMatches = matches;
+
+          cout << "#7 : MATCH KEYPOINT DESCRIPTORS done" << endl;
+
+          /* TRACK 3D OBJECT BOUNDING BOXES */
+
+          //// STUDENT ASSIGNMENT
+          //// TASK FP.1 -> match list of 3D objects (vector<BoundingBox>)
+          /// between
+          /// current and previous frame (implement ->matchBoundingBoxes)
+          map<int, int> bbBestMatches;
+          matchBoundingBoxes(matches, bbBestMatches, *(dataBuffer.end() - 2),
+                             *(dataBuffer.end() -
+                               1)); // associate bounding boxes between current
+                                    // and previous frame using keypoint matches
           //// EOF STUDENT ASSIGNMENT
 
-          bVis = true;
-          if (bVis) {
-            cv::Mat visImg = (dataBuffer.end() - 1)->cameraImg.clone();
-            showLidarImgOverlay(visImg, currBB->lidarPoints, P_rect_00,
-                                R_rect_00, RT, &visImg);
-            cv::rectangle(visImg, cv::Point(currBB->roi.x, currBB->roi.y),
-                          cv::Point(currBB->roi.x + currBB->roi.width,
-                                    currBB->roi.y + currBB->roi.height),
-                          cv::Scalar(0, 255, 0), 2);
+          // store matches in current data frame
+          (dataBuffer.end() - 1)->bbMatches = bbBestMatches;
 
-            char str[200];
-            sprintf(str, "TTC Lidar : %f s, TTC Camera : %f s", ttcLidar,
-                    ttcCamera);
-            putText(visImg, str, cv::Point2f(80, 50), cv::FONT_HERSHEY_PLAIN, 2,
-                    cv::Scalar(0, 0, 255));
+          cout << "#8 : TRACK 3D OBJECT BOUNDING BOXES done" << endl;
 
-            string windowName = "Final Results : TTC";
-            cv::namedWindow(windowName, 4);
-            cv::imshow(windowName, visImg);
-            cout << "Press key to continue to next frame" << endl;
-            cv::waitKey(0);
-          }
-          bVis = false;
+          /* COMPUTE TTC ON OBJECT IN FRONT */
 
-        } // eof TTC computation
-      }   // eof loop over all BB matches
-    }
+          // loop over all BB match pairs
+          for (auto it1 = (dataBuffer.end() - 1)->bbMatches.begin();
+               it1 != (dataBuffer.end() - 1)->bbMatches.end(); ++it1) {
+            // find bounding boxes associates with current match
+            BoundingBox *prevBB, *currBB;
+            for (auto it2 = (dataBuffer.end() - 1)->boundingBoxes.begin();
+                 it2 != (dataBuffer.end() - 1)->boundingBoxes.end(); ++it2) {
+              if (it1->second == it2->boxID) // check wether current match
+                                             // partner corresponds to this BB
+              {
+                currBB = &(*it2);
+              }
+            }
 
-  } // eof loop over all images
+            for (auto it2 = (dataBuffer.end() - 2)->boundingBoxes.begin();
+                 it2 != (dataBuffer.end() - 2)->boundingBoxes.end(); ++it2) {
+              if (it1->first == it2->boxID) // check wether previous match
+                                            // partner corresponds to this BB
+              {
+                prevBB = &(*it2);
+              }
+            }
+
+            //        std::cout << "currBB=" << currBB->lidarPoints.size()
+            //                  << " prevBB=" << prevBB->lidarPoints.size() <<
+            //                  std::endl;
+
+            // compute TTC for current match
+            if (currBB->lidarPoints.size() > 0 &&
+                prevBB->lidarPoints.size() >
+                    0) // only compute TTC if we have Lidar points
+            {
+              //          std::cout << "prevBB=" << prevBB->boxID
+              //                    << " -> currBB=" << currBB->boxID <<
+              //                    std::endl;
+
+              //// STUDENT ASSIGNMENT
+              //// TASK FP.2 -> compute time-to-collision based on Lidar data
+              ///(implement -> computeTTCLidar)
+              double ttcLidar;
+              computeTTCLidar(prevBB->lidarPoints, currBB->lidarPoints,
+                              sensorFrameRate, ttcLidar);
+              StatsFactory::instance().update_ttc_lidar(ttcLidar);
+              //// EOF STUDENT ASSIGNMENT
+
+              //// STUDENT ASSIGNMENT
+              //// TASK FP.3 -> assign enclosed keypoint matches to bounding box
+              ///(implement -> clusterKptMatchesWithROI) / TASK FP.4 -> compute
+              /// time-to-collision based on camera (implement ->
+              /// computeTTCCamera)
+              double ttcCamera;
+              clusterKptMatchesWithROI(*currBB,
+                                       (dataBuffer.end() - 2)->keypoints,
+                                       (dataBuffer.end() - 1)->keypoints,
+                                       (dataBuffer.end() - 1)->kptMatches);
+              computeTTCCamera((dataBuffer.end() - 2)->keypoints,
+                               (dataBuffer.end() - 1)->keypoints,
+                               currBB->kptMatches, sensorFrameRate, ttcCamera);
+              StatsFactory::instance().update_ttc_camera(ttcCamera);
+              //// EOF STUDENT ASSIGNMENT
+
+              bVis = false;
+              if (bVis) {
+                cv::Mat visImg = (dataBuffer.end() - 1)->cameraImg.clone();
+                showLidarImgOverlay(visImg, currBB->lidarPoints, P_rect_00,
+                                    R_rect_00, RT, &visImg);
+                cv::rectangle(visImg, cv::Point(currBB->roi.x, currBB->roi.y),
+                              cv::Point(currBB->roi.x + currBB->roi.width,
+                                        currBB->roi.y + currBB->roi.height),
+                              cv::Scalar(0, 255, 0), 2);
+
+                char str[200];
+                sprintf(str, "TTC Lidar : %f s, TTC Camera : %f s", ttcLidar,
+                        ttcCamera);
+                putText(visImg, str, cv::Point2f(80, 50),
+                        cv::FONT_HERSHEY_PLAIN, 2, cv::Scalar(0, 0, 255));
+
+                string windowName = "Final Results : TTC";
+                cv::namedWindow(windowName, 4);
+                cv::imshow(windowName, visImg);
+                cout << "Press key to continue to next frame" << endl;
+                cv::waitKey(0);
+              }
+              bVis = false;
+
+            } // eof TTC computation
+          }   // eof loop over all BB matches
+        }
+
+      } // eof loop over all images
+
+    } // eof loop detectorType
+  }   // eof loop descriptorType
+
+  StatsFactory::instance().write(outputPath);
 
   return 0;
 }
